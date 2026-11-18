@@ -1,0 +1,60 @@
+name: Smart Finance
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: pipeline-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      COMPOSE_FILE: compose.yaml:compose.nginx.yaml
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Deployment helper checks
+        run: |
+          python3 -m unittest discover -s scripts/tests -v
+          bash -n scripts/deploy.sh
+      - name: Prepare ephemeral configuration
+        run: python3 scripts/configure.py
+      - name: Build and start isolated app
+        run: docker compose up -d --build --wait --wait-timeout 180
+      - name: PostgreSQL tests and migration checks
+        run: python3 scripts/test_docker.py
+      - name: Frontend typecheck
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run typecheck
+      - name: Seed disposable browser account
+        run: python3 scripts/seed_demo.py
+      - name: Desktop and mobile browser tests
+        working-directory: frontend
+        run: |
+          # Ubuntu 24.04 runners ship Chrome and its system dependencies.
+          SF_CHROME_PATH="$(command -v google-chrome)"
+          "$SF_CHROME_PATH" --version
+          export SF_CHROME_PATH
+          npx playwright test
+      - name: Backup and restore verification
+        run: |
+          sh scripts/backup.sh
+          python3 scripts/verify_restore.py
+      - name: Remove ephemeral databases and credentials
+        if: always()
+        run: |
+          docker compose down --volumes --remove-orphans
+          rm -rf .env artifacts backups
